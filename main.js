@@ -8,6 +8,8 @@ const PRIME_D = 161387;
 // const MASK = (1 << 48) - 1;
 
 
+
+
 function randomize(seed) {
 	return (seed * PRIME_A + PRIME_B) ^ 1999998827;
 	// let num: u64 = (seed as u64 ^ MULTIPLIER) & MASK;
@@ -85,6 +87,14 @@ class Vec2 {
 	add(v) {
 		return vec2(this.x + v.x, this.y + v.y);
 	}
+
+	toUint() {
+		return this.x | (this.y << 16);
+	}
+}
+
+Vec2.fromUint = function Vec2FromUint(uint) {
+	return new Vec2(uint & 0xffff, uint >> 16);
 }
 
 Vec2.unHash = function Vec2UnHash(str) {
@@ -150,7 +160,12 @@ class RiverGen {
 			}
 		}
 		this.wetness = new Uint8ClampedArray(width * height);
-		this.erosion = 0
+		this.erosion = 0;
+		this.lakeCounter = 0;
+		this.lakeIds = new Uint32Array(width * height);
+		this.lakeProps = [null]
+		this.nextPos = new Uint32Array(width * height);
+
 		// this.erode()
 	}
 
@@ -239,8 +254,147 @@ class RiverGen {
 		this.erosion += steps;
 	}
 
+
+	addStream(){
+		let x = Math.random() * this.size.x | 0;
+		let y = Math.random() * this.size.y | 0;
+		let pos = vec2(x, y);
+		let height = this.getHeight(pos);
+		while (height >= 0) {
+			let index = this.index(pos);
+			if (index === 0) {
+				return;
+			}
+			this.wetness[index] += 1;
+			let lakeId = this.lakeIds[index];
+			if (lakeId !== 0) {
+				// console.log("entering lake", pos, lakeId);
+				// console.log(this.lakeProps);
+				// window.lakeIds = this.lakeIds;
+				let lake = this.lakeProps[lakeId];
+				lake.wetness += 1;
+				pos = lake.exit;
+				height = this.getHeight(pos);
+				continue;
+			}
+			// if (this.nextPos[index] !== 0) {
+			// 	pos = Vec2.fromUint(this.nextPos[index] - 1);
+			// 	console.log(pos);
+			// 	height = this.getHeight(pos);
+			// 	continue;
+			// }
+			let neighbours = [
+				[pos.x - 1, pos.y, 1],
+				[pos.x + 1, pos.y, 1],
+				[pos.x, pos.y - 1, 1],
+				[pos.x, pos.y + 1, 1],
+				[pos.x - 1, pos.y - 1, 0.707],
+				[pos.x + 1, pos.y - 1, 0.707],
+				[pos.x - 1, pos.y + 1, 0.707],
+				[pos.x + 1, pos.y + 1, 0.707],
+			];
+			let dh = 0;
+			let lastHeight = height;
+			for (let [nx, ny, f] of neighbours) {
+				let np = vec2(nx, ny);
+				let nh = this.getHeight(np);
+				let score = (lastHeight - nh) * f;
+				if (score > dh) {
+					dh = score;
+					height = nh;
+					pos = np;
+				}
+			}
+			if (dh === 0) {
+				pos = this.fillLake(pos);
+			} else {
+				// this.nextPos[index] = pos.toUint() + 1;
+			}
+		}
+	}
+
+	fillLake(start) {
+		if (this.index(start) === null) {
+			console.error("trying to fill a lake at invalid positon", start);
+			return null;
+		}
+		let known = new Uint8Array(this.width * this.height);
+		let fringe = new PriorityQueue();
+		fringe.add(this.getHeight(start), start);
+		known[this.index(start)] = 1;
+		let lakeId = ++this.lakeCounter;
+		let lastHeight = -Infinity;
+		let lake = {wetness: 1, exit: null, size: 0};
+		this.lakeProps[lakeId] = lake;
+		while (true) {
+			let [height, pos] = fringe.remove();
+			// console.log("h", height, pos);
+			let oldLakeId = this.lakeIds[this.index(pos)];
+			if (oldLakeId !== 0) {
+				let oldLake = this.lakeProps[oldLakeId];
+				// console.log("merging lake", this.index(pos), pos, ":", lakeId, oldLakeId, oldLake);
+				// console.log(this.lakeProps);
+				// window.lakeIds = this.lakeIds;
+				if (this.lakeIds[this.index(oldLake.exit)] === lakeId) {
+					// other lake is flowing into this lake; absorb it
+					let absorbFringe = [pos];
+					let oldSize = 0;
+					while (absorbFringe.length) {
+						let pos = absorbFringe.pop();
+						if (this.lakeIds[this.index(pos)] === oldLakeId) {
+							lake.size += 1;
+							oldSize += 1;
+							this.lakeIds[this.index(pos)] = lakeId;
+							for (let nx = pos.x-1; nx <= pos.x+1; ++nx) {
+								for (let ny = pos.y-1; ny <= pos.y+1; ++ny) {
+									let np = vec2(nx, ny)
+									if (known[this.index(np)]) {
+										continue;
+									}
+									known[this.index(np)] = 1;
+									absorbFringe.push(np);
+								}
+							}
+						} else {
+							fringe.add(this.getHeight(pos), pos);
+						}
+					}
+					// console.log("oldsize", oldSize, oldLake)
+					this.lakeProps[oldLakeId] = null;
+					continue;
+				} else {
+					// lake is lower: this lake flows into it
+					lake.exit = pos;
+					break;
+				}
+			}
+			if (height < lastHeight) {
+				lake.exit = pos;
+				break
+			}
+			lake.size += 1;
+			lastHeight = height;
+			this.lakeIds[pos.x + this.size.x * pos.y] = lakeId;
+			for (let nx = pos.x-1; nx <= pos.x+1; ++nx) {
+				for (let ny = pos.y-1; ny <= pos.y+1; ++ny) {
+					let np = vec2(nx, ny)
+					if (known[this.index(np)]) {
+						continue;
+					}
+					known[this.index(np)] = 1;
+					fringe.add(this.getHeight(np), np);
+				}
+			}
+		}
+		return lake.exit;
+	}
+
 	addRivers(count){
 		for (let i=0; i<count; ++i) {
+			this.addStream();
+		}
+		return;
+		{
 			let x = Math.random() * this.width|0;//(randomize(this.seed ^ randomize(seed*73))&0xffffff) % this.width;
 			let y = Math.random() * this.height|0;//(randomize(randomize(this.seed*5) ^ randomize(seed*37))&0xffffff) % this.height;
 			// console.log(x, y, this.mapgen.heightAt(x, y));
@@ -305,6 +459,17 @@ class RiverGen {
 		}
 	}
 
+	index(pos) {
+		if (pos.x < 0 || pos.y < 0 || pos.x >= this.size.x || pos.y >= this.size.y) {
+			return null;
+		}
+		return pos.x + this.size.x * pos.y;
+	}
+
+	getHeight(pos) {
+		return this.map[pos.x + this.size.x * pos.y];
+	}
+
 	heightAt(x, y) {
 		return this.map[x + y*this.size.x];
 	}
@@ -316,8 +481,12 @@ class RiverGen {
 		let g = Math.min(1, Math.max(0, 0.2 + h - this.originalHeight[ind]))
 		let c = h*256 | ((g * 255) << 8)
 		let w = this.wetness[ind];
-		if (w > 3) {
-			return c  | (Math.min(255, 150 + w)<<16);
+		let lake = this.lakeProps[this.lakeIds[ind]];
+		if (lake) {
+			w = lake.wetness;
+		}
+		if (w > 10) {
+			return c  | (Math.min(255, 100 + w)<<16);
 		} else {
 			return c;
 		}
@@ -363,7 +532,8 @@ function main() {
 	world.draw("original");
 	window.world = world;
 	// console.log("generated world", (Date.now() - startTime) / 1000);
-	this.requestAnimationFrame(() => stepErosion(world));
+	this.requestAnimationFrame(() => step(world));
+	setInterval(() => world.draw(), 500);
 	// requestAnimationFrame(() => step(world, 10000));
 	// for (let i=0;i<10; ++i) {
 	// 	world.gen.addRiver(i);
@@ -380,7 +550,7 @@ function stepErosion(world) {
 	world.gen.erode(1000);
 	world.gen.blur(0.99, 0.008, 0.002);
 	console.log((Date.now() - startTime) / 1000);
-	world.draw();
+	// world.draw();
 	requestAnimationFrame(()=>stepErosion(world));
 }
 
@@ -390,11 +560,11 @@ function step(world) {
 
 	let startTime = Date.now()
 	// for (let i=0; i<1000; ++i) {
-		world.gen.addRivers(1000);
+		world.gen.addRivers(100000);
 	// }
 	let riverTime = Date.now();
-	world.draw();
-	console.log("river", (riverTime - startTime) / 1000, "draw", (Date.now() - riverTime) / 1000);
+	// world.draw();
+	console.log("river", (riverTime - startTime) / 1000);
 	requestAnimationFrame(() => step(world));
 }
 
