@@ -35,7 +35,7 @@ class MapGen {
 		this.noise = new FastNoiseLite();
 		this.noise.SetNoiseType(FastNoiseLite.NoiseType.OpenSimplex2);
 		this.noise.SetFractalType(FastNoiseLite.FractalType.FBm);
-		this.noise.SetFractalOctaves(8);
+		this.noise.SetFractalOctaves(12);
 		this.noise.SetFrequency(0.005);
 	}
 
@@ -165,8 +165,53 @@ class RiverGen {
 		this.lakeIds = new Uint32Array(width * height);
 		this.lakeProps = [null]
 		this.nextPos = new Uint32Array(width * height);
+	}
 
-		// this.erode()
+	direct() {
+		this.wetness = new Uint8ClampedArray(this.size.surface());
+		this.lakeCounter = 0;
+		this.lakeIds = new Uint32Array(this.size.surface());
+		this.lakeProps = [null]
+		let calcNextTime = Date.now();
+		for (let y=0; y<this.size.y; ++y) {
+			for (let x=0; x<this.size.x; ++x) {
+				let height = this.heightAt(x, y);
+				if (height < 0) {
+					continue;
+				}
+				let neighbours = [
+					[x - 1, y, 1],
+					[x + 1, y, 1],
+					[x, y - 1, 1],
+					[x, y + 1, 1],
+					[x - 1, y - 1, 0.707],
+					[x + 1, y - 1, 0.707],
+					[x - 1, y + 1, 0.707],
+					[x + 1, y + 1, 0.707],
+				];
+				let nextPos = null;
+				let dh = 0;
+				for (let [nx, ny, f] of neighbours) {
+					let np = vec2(nx, ny);
+					if (this.outOfBounds(np)) {
+						continue;
+					}
+					let nh = this.heightAt(nx, ny);
+					let score = (height - nh) * f;
+					if (score > dh) {
+						dh = score;
+						nextPos = np;
+					}
+				}
+				if (nextPos !== null) {
+					this.nextPos[x + this.size.x * y] = this.index(nextPos) + 1;
+					// this.nextIndex[x + this.size.x * y] = this.index(nextPos) + 1;
+				} else {
+					this.fillLake(vec2(x, y));
+				}
+			}
+		}
+		console.log("calc next", (Date.now() - calcNextTime) / 1000);
 	}
 
 	normal(x, y) {
@@ -255,61 +300,31 @@ class RiverGen {
 	}
 
 
-	addStream(){
-		let x = Math.random() * this.size.x | 0;
-		let y = Math.random() * this.size.y | 0;
-		let pos = vec2(x, y);
-		let height = this.getHeight(pos);
-		while (height >= 0) {
-			let index = this.index(pos);
+	addStream(x, y){
+		// let x = Math.random() * this.size.x | 0;
+		// let y = Math.random() * this.size.y | 0;
+		// let pos = vec2(x, y);
+		let index = x + this.size.x * y;
+		let height;// = this.getHeight(pos);
+		// let limit = 10000
+		while ((height = this.map[index]) >= 0) {
+			// let index = this.index(pos);
 			if (index === 0) {
 				return;
 			}
 			this.wetness[index] += 1;
 			let lakeId = this.lakeIds[index];
 			if (lakeId !== 0) {
-				// console.log("entering lake", pos, lakeId);
-				// console.log(this.lakeProps);
-				// window.lakeIds = this.lakeIds;
 				let lake = this.lakeProps[lakeId];
 				lake.wetness += 1;
-				pos = lake.exit;
-				height = this.getHeight(pos);
+				index = this.index(lake.exit);
 				continue;
 			}
-			// if (this.nextPos[index] !== 0) {
-			// 	pos = Vec2.fromUint(this.nextPos[index] - 1);
-			// 	console.log(pos);
-			// 	height = this.getHeight(pos);
-			// 	continue;
-			// }
-			let neighbours = [
-				[pos.x - 1, pos.y, 1],
-				[pos.x + 1, pos.y, 1],
-				[pos.x, pos.y - 1, 1],
-				[pos.x, pos.y + 1, 1],
-				[pos.x - 1, pos.y - 1, 0.707],
-				[pos.x + 1, pos.y - 1, 0.707],
-				[pos.x - 1, pos.y + 1, 0.707],
-				[pos.x + 1, pos.y + 1, 0.707],
-			];
-			let dh = 0;
-			let lastHeight = height;
-			for (let [nx, ny, f] of neighbours) {
-				let np = vec2(nx, ny);
-				let nh = this.getHeight(np);
-				let score = (lastHeight - nh) * f;
-				if (score > dh) {
-					dh = score;
-					height = nh;
-					pos = np;
-				}
+			if (this.nextPos[index] !== 0) {
+				index = this.nextPos[index] - 1;
+				continue;
 			}
-			if (dh === 0) {
-				pos = this.fillLake(pos);
-			} else {
-				// this.nextPos[index] = pos.toUint() + 1;
-			}
+			console.error("not computed tile", index);
 		}
 	}
 
@@ -318,48 +333,51 @@ class RiverGen {
 			console.error("trying to fill a lake at invalid positon", start);
 			return null;
 		}
-		let known = new Uint8Array(this.width * this.height);
+		// let known = new Uint8Array(this.width * this.height);
+		let known = new Set();
 		let fringe = new PriorityQueue();
 		fringe.add(this.getHeight(start), start);
-		known[this.index(start)] = 1;
+		// known[this.index(start)] = 1;
+		known.add(this.index(start));
 		let lakeId = ++this.lakeCounter;
 		let lastHeight = -Infinity;
 		let lake = {wetness: 1, exit: null, size: 0};
 		this.lakeProps[lakeId] = lake;
 		while (true) {
 			let [height, pos] = fringe.remove();
-			// console.log("h", height, pos);
 			let oldLakeId = this.lakeIds[this.index(pos)];
+			if (oldLakeId === lakeId) {
+				continue;
+			}
 			if (oldLakeId !== 0) {
 				let oldLake = this.lakeProps[oldLakeId];
-				// console.log("merging lake", this.index(pos), pos, ":", lakeId, oldLakeId, oldLake);
-				// console.log(this.lakeProps);
-				// window.lakeIds = this.lakeIds;
 				if (this.lakeIds[this.index(oldLake.exit)] === lakeId) {
 					// other lake is flowing into this lake; absorb it
 					let absorbFringe = [pos];
 					let oldSize = 0;
 					while (absorbFringe.length) {
 						let pos = absorbFringe.pop();
-						if (this.lakeIds[this.index(pos)] === oldLakeId) {
+						let id = this.lakeIds[this.index(pos)]
+						if (id === oldLakeId) {
 							lake.size += 1;
 							oldSize += 1;
 							this.lakeIds[this.index(pos)] = lakeId;
 							for (let nx = pos.x-1; nx <= pos.x+1; ++nx) {
 								for (let ny = pos.y-1; ny <= pos.y+1; ++ny) {
-									let np = vec2(nx, ny)
-									if (known[this.index(np)]) {
+									let np = vec2(nx, ny);
+									let nind = this.index(np)
+									if (known.has(nind) && this.lakeIds[nind] !== oldLakeId) {
 										continue;
 									}
-									known[this.index(np)] = 1;
+									known.add(nind);
+									// known[nind] = 1;
 									absorbFringe.push(np);
 								}
 							}
-						} else {
+						} else if (id !== lakeId) {
 							fringe.add(this.getHeight(pos), pos);
 						}
 					}
-					// console.log("oldsize", oldSize, oldLake)
 					this.lakeProps[oldLakeId] = null;
 					continue;
 				} else {
@@ -378,10 +396,10 @@ class RiverGen {
 			for (let nx = pos.x-1; nx <= pos.x+1; ++nx) {
 				for (let ny = pos.y-1; ny <= pos.y+1; ++ny) {
 					let np = vec2(nx, ny)
-					if (known[this.index(np)]) {
+					if (known.has(this.index(np))) {
 						continue;
 					}
-					known[this.index(np)] = 1;
+					known.add(this.index(np));// = 1;
 					fringe.add(this.getHeight(np), np);
 				}
 			}
@@ -390,73 +408,21 @@ class RiverGen {
 	}
 
 	addRivers(count){
-		for (let i=0; i<count; ++i) {
-			this.addStream();
-		}
-		return;
-		{
-			let x = Math.random() * this.width|0;//(randomize(this.seed ^ randomize(seed*73))&0xffffff) % this.width;
-			let y = Math.random() * this.height|0;//(randomize(randomize(this.seed*5) ^ randomize(seed*37))&0xffffff) % this.height;
-			// console.log(x, y, this.mapgen.heightAt(x, y));
-			let fringe = new Vec2Queue();
-			let known = new Uint8Array(this.width * this.height);
-			fringe.insert(vec2(x, y), this.heightAt(x, y));
-			known[x + y * this.width] = 1;
-			let limit=100000;
-			let lastHeight = -Infinity;
-			while (fringe.size() && --limit) {
-				let [pos, height] = fringe.pop();
-				if (height < 0) {
-					break;
-				}
-				if (height < lastHeight) {
-					while (height < lastHeight && height >= 0) {
-						known[pos.x + pos.y * this.width] = 1;
-						this.wetness[pos.x + pos.y*this.width] += 1;
-						let dh = 0;
-						lastHeight = height;
-						let neighbours = [
-							[pos.x - 1, pos.y, 1],
-							[pos.x + 1, pos.y, 1],
-							[pos.x, pos.y - 1, 1],
-							[pos.x, pos.y + 1, 1],
-							[pos.x - 1, pos.y - 1, 0.707],
-							[pos.x + 1, pos.y - 1, 0.707],
-							[pos.x - 1, pos.y + 1, 0.707],
-							[pos.x + 1, pos.y + 1, 0.707],
-						];
-						for (let [nx, ny, f] of neighbours) {
-						// for (let nx = pos.x-1; nx <= pos.x+1; ++nx) {
-							// for (let ny = pos.y-1; ny <= pos.y+1; ++ny) {
-								if (known[nx + this.width * ny]) {
-									continue;
-								}
-								let nh = this.heightAt(nx, ny);
-								let score = (lastHeight - nh) * f;
-								if (score > dh) {
-									height = nh;
-									dh = score;
-									pos = vec2(nx, ny);
-								}
-							// }
-						}
-					}
-					fringe.insert(pos, height);
-					continue;
-				}
-				this.wetness[pos.x + pos.y*this.width] += 1;
-				for (let nx = pos.x-1; nx <= pos.x+1; ++nx) {
-					for (let ny = pos.y-1; ny <= pos.y+1; ++ny) {
-						if (known[nx + this.width * ny]) {
-							continue;
-						}
-						known[nx + this.width * ny] = 1;
-						fringe.insert(vec2(nx, ny), this.heightAt(nx, ny));
-					}
-				}
-				lastHeight = height;
+		// for (let i=0; i<count; ++i) {
+		// 	let x = Math.random() * this.size.x | 0;
+		// 	let y = Math.random() * this.size.y | 0;
+		// 	this.addStream(x, y);
+		// }
+		for (let y=0; y<this.size.y; y++){
+			for (let x=0; x<this.size.x; x++){
+				this.addStream(x, y);
 			}
 		}
+
+	}
+
+	outOfBounds(pos) {
+		return pos.x < 0 || pos.y < 0 || pos.x >= this.size.x || pos.y >= this.size.y;
 	}
 
 	index(pos) {
@@ -464,6 +430,10 @@ class RiverGen {
 			return null;
 		}
 		return pos.x + this.size.x * pos.y;
+	}
+
+	fromIndex(index) {
+		return vec2(index % this.size.x, (index / this.size.x)|0);
 	}
 
 	getHeight(pos) {
@@ -485,8 +455,8 @@ class RiverGen {
 		if (lake) {
 			w = lake.wetness;
 		}
-		if (w > 10) {
-			return c  | (Math.min(255, 100 + w)<<16);
+		if (w > 150) {
+			return c  | (Math.min(255,  w)<<16);
 		} else {
 			return c;
 		}
@@ -526,14 +496,15 @@ const maxErosion = 5000
 
 function main() {
 	let startTime = Date.now()
-	let size = 1024;
+	let size = 2048;
 	let world = new World(vec2(size, size), 12);
 	world.draw();
 	world.draw("original");
 	window.world = world;
+	world.gen.direct();
 	// console.log("generated world", (Date.now() - startTime) / 1000);
 	this.requestAnimationFrame(() => step(world));
-	setInterval(() => world.draw(), 500);
+	setInterval(() => world.draw(), 200);
 	// requestAnimationFrame(() => step(world, 10000));
 	// for (let i=0;i<10; ++i) {
 	// 	world.gen.addRiver(i);
@@ -558,6 +529,7 @@ function stepErosion(world) {
 function step(world) {
 
 
+	world.gen.direct();
 	let startTime = Date.now()
 	// for (let i=0; i<1000; ++i) {
 		world.gen.addRivers(100000);
