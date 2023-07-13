@@ -567,7 +567,7 @@ function step(world) {
 	let riverTime = Date.now();
 	// world.draw();
 	console.log("river", (riverTime - startTime) / 1000);
-	requestAnimationFrame(() => step(world));
+	// requestAnimationFrame(() => step(world));
 }
 
 window.addEventListener("load", main);
