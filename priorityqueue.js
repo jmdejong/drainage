@@ -1,5 +1,6 @@
 class PriorityQueue {
-    constructor() {
+    constructor(keyfn) {
+        this.keyfn = keyfn;
         this.heap = [];
     }
 
@@ -67,14 +68,14 @@ class PriorityQueue {
         return item;
     }
 
-    add(priority, item) {
-        this.heap.push([priority, item]);
+    add(item) {
+        this.heap.push(item);
         this.heapifyUp();
     }
 
     heapifyUp() {
         let index = this.heap.length - 1;
-        while (this.hasParent(index) && this.parent(index)[0] > this.heap[index][0]) {
+        while (this.hasParent(index) && this.keyfn(this.parent(index)) > this.keyfn(this.heap[index])) {
             this.swap(this.getParentIndex(index), index);
             index = this.getParentIndex(index);
         }
@@ -84,10 +85,10 @@ class PriorityQueue {
         let index = 0;
         while (this.hasLeftChild(index)) {
             let smallerChildIndex = this.getLeftChildIndex(index);
-            if (this.hasRightChild(index) && this.rightChild(index)[0] < this.leftChild(index)[0]) {
+            if (this.hasRightChild(index) && this.keyfn(this.rightChild(index)) < this.keyfn(this.leftChild(index))) {
                 smallerChildIndex = this.getRightChildIndex(index);
             }
-            if (this.heap[index][0] < this.heap[smallerChildIndex][0]) {
+            if (this.keyfn(this.heap[index]) < this.keyfn(this.heap[smallerChildIndex])) {
                 break;
             } else {
                 this.swap(index, smallerChildIndex);

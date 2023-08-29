@@ -108,36 +108,22 @@ function vec2(x, y) {
 	return new Vec2(x, y);
 }
 
-class Vec2Queue {
-	constructor(width, height) {
-		this.heap = new PriorityQueue();
-		// this.map = new Map();
+class TileQueue {
+	constructor(keyfunc) {
+		this.heap = new PriorityQueue(keyfunc);
+		this.known = new Set();
 	}
-	insert(pos, height) {
-		// let h = pos.hash();
-		// if (this.known.has(h)){
-			// return;
-		// }
-		this.heap.add(height, pos);
-		// this.map.set(pos.hash(), height);
+	add(ind) {
+		if (!this.known.has(ind)) {
+			this.heap.add(ind);
+			this.known.add(ind);
+		}
 	}
-	pop() {
-		let [height, pos] = this.heap.remove();
-		return [pos, height];
-		// let smallest = null;
-		// let lowest = Infinity;
-		// this.map.forEach((height, pos) => {
-		// 	if (height < lowest) {
-		// 		smallest = pos;
-		// 		lowest = height;
-		// 	}
-		// });
-		// this.map.delete(smallest);
-		// return [Vec2.unHash(smallest), lowest];
+	remove() {
+		return this.heap.remove();
 	}
 	size() {
-		return this.heap.heap.length
-		// return this.map.size;
+		return this.heap.heap.length;
 	}
 }
 
@@ -161,16 +147,16 @@ class RiverGen {
 				this.originalHeight[x + y*this.size.x] = h;
 			}
 		}
-		this.wetness = new Uint8ClampedArray(width * height);
+		this.wetness = new Int32Array(width * height);
 		this.erosion = 0;
 		this.lakeCounter = 0;
 		this.lakeIds = new Uint32Array(width * height);
 		this.lakeProps = [null]
 		this.nextPos = new Uint32Array(width * height);
+		this.errTiles = new Uint8ClampedArray(width * height);
 	}
 
 	direct() {
-		this.wetness = new Uint8ClampedArray(this.size.surface());
 		let ntiles = this.size.surface()
 		for (let index=0; index<ntiles; index++) {
 			let height = this.map[index]
@@ -299,7 +285,7 @@ class RiverGen {
 	addStream(x, y){
 		let index = x + this.size.x * y;
 		length = 0;
-		while (index >= this.size.x && index < this.size.x * (this.size.y - 1) && (index + 1) % this.size.x > 1) {
+		while (!this.isEdge(index)) {
 			let height = this.map[index];
 			if (index === 0) {
 				return;
@@ -311,7 +297,7 @@ class RiverGen {
 					return;
 				}
 				lake.wetness += 1;
-				index = this.index(lake.exit);
+				index = lake.exit;
 			} else {
 				this.wetness[index] += 1;
 				let oldIndex = index;
@@ -331,15 +317,13 @@ class RiverGen {
 			return null;
 		}
 		let known = new Set();
-		let fringe = new PriorityQueue();
-		fringe.add(this.getHeight(start), start);
-		known.add(this.index(start));
+		let fringe = new TileQueue(i => this.map[i]);
+		fringe.add(this.index(start));
 		let lakeId = ++this.lakeCounter;
-		let lake = {wetness: 1, exit: null, size: 0, height: -Infinity};
+		let lake = {wetness: 0, exit: null, size: 0, height: -Infinity};
 		this.lakeProps[lakeId] = lake;
 		while (true) {
-			let [height, pos] = fringe.remove();
-			let index = this.index(pos)
+			let index = fringe.remove();
 			let oldLakeId = this.lakeIds[index];
 			if (oldLakeId === lakeId) {
 				continue;
@@ -347,38 +331,49 @@ class RiverGen {
 			if (oldLakeId !== 0) {
 				let oldLake = this.lakeProps[oldLakeId];
 				if (!oldLake) {
-					console.error("old lake", oldLake, oldLakeId, pos);
+					console.error("old lake", oldLake, oldLakeId, this.fromIndex(index));
 				}
-				if (this.lakeIds[this.index(oldLake.exit)] === lakeId) {
-					// other lake is flowing into this lake; absorb it
-					this.absorbLake(index, oldLakeId, lakeId, lake, fringe, known);
-					continue;
-				} else {
+				if (oldLake.height < lake.height) {
 					// lake is lower: this lake flows into it
-					lake.exit = pos;
+					lake.exit = index;
 					break;
+				} else {
+					// other lake is flowing into this lake; absorb it
+					this.absorbLake(index, oldLakeId, lakeId, lake, fringe);
+					lake.height = oldLake.height
+					continue;
 				}
 			}
+			let height = this.map[index];
 			if (height < lake.height) {
-				lake.exit = pos;
+				lake.exit = index;
+				if (oldLakeId !== 0) {
+					let oldLake = this.lakeProps[oldLakeId];
+					if (oldLake.height >= lake.height){
+						console.error("lake draining into higher lake wtf");
+						console.error(lakeId, lake, this.fromIndex(lake.exit));
+						console.error(oldLakeId, oldLake, this.fromIndex(oldLake.exit));
+						for (let x=-2; x<=2; ++x) {
+							for (let y=-2; y<=2; ++y) {
+								let p = vec2(x, y).add(this.fromIndex(lake.exit))
+								console.log(p, this.lakeIds[this.index(p)], this.surfaceHeight(this.index(p)));
+							}
+						}
+					}
+				}
 				break
 			}
 			lake.size += 1;
 			lake.height = height;
 			this.lakeIds[index] = lakeId;
-			// lake.tiles.add(index);
 			for (let nind of this.neighbourIndices(index)) {
-				if (known.has(nind)) {
-					continue;
-				}
-				known.add(nind);
-				fringe.add(this.map[nind], this.fromIndex(nind));
+				fringe.add(nind);
 			}
 		}
 		return lake.exit;
 	}
 
-	absorbLake(ind, oldLakeId, lakeId, lake, fringe, known) {
+	absorbLake(ind, oldLakeId, lakeId, lake, fringe) {
 		let absorbFringe = [ind];
 		this.lakeIds[ind] = lakeId;
 		lake.size += 1;
@@ -389,45 +384,98 @@ class RiverGen {
 				if (nid === oldLakeId) {
 					lake.size += 1;
 					this.lakeIds[nind] = lakeId;
-					known.add(nind);
 					absorbFringe.push(nind)
-				} else if (!known.has(nind) && nid !== lakeId) {
-					known.add(nind);
-					fringe.add(this.map[nind], this.fromIndex(nind));
+				} else if (nid !== lakeId) {
+					fringe.add(nind);
 				}
 			}
-			// let id = this.lakeIds[ind];
-			// if (id === oldLakeId) {
-			// 	lake.size += 1;
-			// 	this.lakeIds[ind] = lakeId;
-			// 	for (let nind of this.neighbourIndices(ind)) {
-			// 		if (known.has(nind) && this.lakeIds[nind] !== oldLakeId) {
-			// 			continue;
-			// 		}
-			// 		known.add(nind);
-			// 		absorbFringe.push(nind);
-			// 	}
-			// } else if (id !== lakeId) {
-			// 	fringe.add(this.map[ind], this.fromIndex(ind));
-			// }
 		}
 		this.lakeProps[oldLakeId] = null;
 	}
 
 	addRivers(){
+		this.wetness = new Int32Array(this.size.surface());
 		for (let y=1; y<this.size.y-1; y++){
 			for (let x=1; x<this.size.x-1; x++){
 				this.addStream(x, y);
 			}
 		}
-
 	}
 
-	fillLakes(order) {
+	addOrderedRivers(order){
+		let isProcessed = new Uint8ClampedArray(this.size.surface());
+		this.errTiles = new Uint8ClampedArray(this.size.surface());
+		this.wetness = new Int32Array(this.size.surface());
+		for (let i=order.length; i--;) {
+			// let [height, ind] = this.fromBig(order[i]);
+			let ind = order[i];
+			let height = this.map[ind];
+			isProcessed[ind] = 1;
+			if (this.isEdge(ind)) {
+				continue;
+			}
+			this.wetness[ind]++;
+			if (this.lakeIds[ind] !== 0) {
+				let lake = this.lakeProps[this.lakeIds[ind]];
+				lake.wetness += this.wetness[ind];
+				if (!lake.isSea) {
+					let next = lake.exit;
+					this.wetness[next] += this.wetness[ind];
+					if (isProcessed[next]) {
+						console.error("out of order lake", this.fromIndex(ind), this.map[ind], this.surfaceHeight(ind), this.lakeIds[ind], this.fromIndex(next), this.map[next], this.surfaceHeight(next), this.lakeIds[next]);
+						this.errTiles[ind] |= 1;
+						this.errTiles[next] |= 2;
+					}
+				}
+				continue;
+			}
+			let neighbours = [
+				[ind - 1 - this.size.x, 0.707],
+				[ind + 1 - this.size.x, 0.707],
+				[ind - 1 + this.size.x, 0.707],
+				[ind + 1 + this.size.x, 0.707],
+				[ind - 1, 1],
+				[ind + 1, 1],
+				[ind - this.size.x, 1],
+				[ind + this.size.x, 1]
+			];
+			let next = null;
+			let dh = 0;
+			for (let [nind, weight] of neighbours) {
+				let nh = this.map[nind];
+				let score = (height - nh ) * weight;
+				if (score > dh) {
+					dh = score;
+					next = nind;
+				}
+			}
+			if (next === null) {
+				console.error("endorheic basin found")
+			}
+			if (isProcessed[next]) {
+				console.error("out of order stream");
+			}
+			if (this.lakeIds[next] !== 0) {
+				let lake = this.lakeProps[this.lakeIds[next]];
+				lake.wetness += this.wetness[ind];
+				if (!lake.isSea) {
+					let exit = lake.exit;
+					this.wetness[exit] += this.wetness[ind];
+					if (isProcessed[exit]) {
+						console.error("out of order lakestream");
+					}
+				}
+			} else {
+				this.wetness[next] += this.wetness[ind];
+			}
+		}
+	}
+
+	fillSea() {
 		this.lakeCounter = 1;
 		this.lakeIds = new Uint32Array(this.size.surface());
 		const seaHeight = -0.2;
-		let sea = {wetness: 1e9, exit: vec2(-1, -1), size: 0, height: seaHeight, isSea: true}
+		let sea = {wetness: 1e9, exit: -999999999, size: 0, height: seaHeight, isSea: true}
 		this.lakeProps = [null, sea];
 		let seaId = 1;
 		let seaFringe = [];
@@ -456,7 +504,9 @@ class RiverGen {
 				}
 			}
 		}
+	}
 
+	fillLakes() {
 		for (let y=1; y<this.size.y-1; ++y) {
 			let iy = y * this.size.x;
 			for (let x=1; x<this.size.x-1; ++x) {
@@ -528,9 +578,50 @@ class RiverGen {
 		return this.map[x + y*this.size.x];
 	}
 
+	toBig(height, ind) {
+		return BigInt((height + 5) * 1e7 | 0) << 32n | BigInt(ind)
+	}
+
+	fromBig(big) {
+		return [
+			Number(BigInt.asUintN(32, big >> 32n)) / 1e7 - 5,
+			Number(BigInt.asUintN(32, big))
+		];
+	}
+
+	order() {
+		let sorted = new Uint32Array(this.size.surface());
+		let sh = new Float32Array(this.size.surface())
+		for (let i=0; i<sorted.length; ++i) {
+			sorted[i] = i;
+			sh[i] = this.surfaceHeight(i);
+		}
+		sorted.sort((a, b) => sh[a] - sh[b]);
+		return sorted;
+	}
+
+	surfaceHeight(i) {
+		if (this.lakeIds[i] !== 0) {
+			return this.lakeProps[this.lakeIds[i]].height;
+		} else {
+			return this.map[i];
+		}
+	}
+
+	isEdge(index) {
+		return index < this.size.x || index >= this.size.x * (this.size.y - 1) || (index + 1) % this.size.x <= 1;
+	}
 
 	colorAt(x, y) {
 		let ind = x + y * this.size.x;
+		if (this.errTiles[ind]) {
+			let err = this.errTiles[ind];
+			if (err === 1) {
+				return 0xff;
+			} else {
+				return 0xff00ff;
+			}
+		}
 		let h = this.map[ind];
 		let w = this.wetness[ind];
 		let lake = this.lakeProps[this.lakeIds[ind]];
@@ -541,10 +632,10 @@ class RiverGen {
 			// }
 		}
 		let r = clamp(h*2, 0, 1);
-		let g = clamp(Math.min(h+0.8, 1.8 - h*1.5), 0, 1);//Math.max(0.7-Math.abs(h), 0)//Math.min(1, Math.max(0, 0.2 + h - this.originalHeight[ind]))
+		let g = clamp(Math.min(h+0.8, 1.8 - h*1.5), 0, 1);
 		let c = r*255 | ((g * 255) << 8)
-		if (w > 150) {
-			return c  | (Math.min(255,  w)<<16);
+		if (w > 50) {
+			return c  | (Math.min(255,  w+100)<<16);
 		} else {
 			return c;
 		}
@@ -580,7 +671,15 @@ class World {
 	}
 }
 
-const maxErosion = 5000
+
+
+function time(description, fn) {
+	let startTime = Date.now();
+	let ret = fn();
+	let endTime = Date.now();
+	console.log(description, (endTime - startTime) / 1000);
+	return ret;
+}
 
 function main() {
 	let size = 1024;
@@ -588,16 +687,11 @@ function main() {
 	world.draw();
 	world.draw("original");
 	window.world = world;
-	// world.gen.direct();
-	// console.log("generated world", (Date.now() - startTime) / 1000);
 	this.requestAnimationFrame(() => step(world));
 	setInterval(() => world.draw(), 200);
-	// requestAnimationFrame(() => step(world, 10000));
-	// for (let i=0;i<10; ++i) {
-	// 	world.gen.addRiver(i);
-	// 	world.draw();
-	// }
 }
+
+const maxErosion = 5000
 
 function stepErosion(world) {
 	if (world.gen.erosion > maxErosion ){
@@ -608,38 +702,17 @@ function stepErosion(world) {
 	world.gen.erode(1000);
 	world.gen.blur(0.99, 0.008, 0.002);
 	console.log((Date.now() - startTime) / 1000);
-	// world.draw();
 	requestAnimationFrame(()=>stepErosion(world));
-}
-
-function time(description, fn) {
-	let startTime = Date.now();
-	let ret = fn();
-	let endTime = Date.now();
-	console.log(description, (endTime - startTime) / 1000);
-	return ret;
 }
 
 function step(world) {
 
-	// let lakeStart = Date.now();
+	time("filling sea", () => world.gen.fillSea());
 	time("filling lakes", () => world.gen.fillLakes());
-	// let directStart = Date.now();
-	time("calculating slopes", () => world.gen.direct());
-	// let sortStart = Date.now();
-	// let ntiles = world.size.surface();
-	// let order = new BigInt64Array(ntiles);
-	// for (let i=0; i<ntiles; i++) {
-	// 	order[i] = BigInt((10 - world.gen.map[i]) * 1e6 | 0) * 0x100000000n + BigInt(i);
-	// }
-	// order.sort();
-	// console.log("sort", (startTime - directTime) / 1000);
-	// let riverStart = Date.now()
-	time("adding rivers", () => world.gen.addRivers());
-	// let endTime = Date.now();
-	// world.draw();
-	// console.log("river", (endTime - riverStart) / 1000);
-	// requestAnimationFrame(() => step(world));
+	// time("calculating slopes", () => world.gen.direct());
+	// time("adding rivers", () => world.gen.addRivers());
+	let order = time("sorting tiles", () => world.gen.order());
+	time("adding rivers in order", () => world.gen.addOrderedRivers(order));
 }
 
 window.addEventListener("load", main);
